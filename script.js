@@ -1,17 +1,21 @@
 import sqlite3InitModule from "https://esm.sh/@sqlite.org/sqlite-wasm@3.46.1-build3";
 import { render, html } from "https://cdn.jsdelivr.net/npm/lit-html@3/+esm";
+import { asyncLLM } from "https://cdn.jsdelivr.net/npm/asyncllm@1";
 import { unsafeHTML } from "https://cdn.jsdelivr.net/npm/lit-html@3/directives/unsafe-html.js";
 import { dsvFormat, autoType } from "https://cdn.jsdelivr.net/npm/d3-dsv@3/+esm";
 import { Marked } from "https://cdn.jsdelivr.net/npm/marked@13/+esm";
+
+const $upload = document.getElementById("upload");
+const $prompt = document.getElementById("prompt");
+const $schema = document.getElementById("schema");
+const $toast = document.getElementById("toast");
+const toast = new bootstrap.Toast($toast);
+const $queryForm = document.getElementById("query-form");
 
 // Initialize SQLite
 const defaultDB = "@";
 const sqlite3 = await sqlite3InitModule({ printErr: console.error });
 
-const $upload = document.getElementById("upload");
-const $schema = document.getElementById("schema");
-const $toast = document.getElementById("toast");
-const toast = new bootstrap.Toast($toast);
 // --------------------------------------------------------------------
 // Manage database tables
 const db = new sqlite3.oo1.DB(defaultDB, "c");
@@ -64,7 +68,13 @@ const DB = {
         const uploadDB = new sqlite3.oo1.DB(file.name, "r");
         const tables = uploadDB.exec("SELECT name, sql FROM sqlite_master WHERE type='table'", { rowMode: "object" });
         for (const { name, sql } of tables) {
-          try { db.exec(sql); } catch (e) { console.error(e); notify("danger", e); continue; }
+          try {
+            db.exec(sql);
+          } catch (e) {
+            console.error(e);
+            notify("danger", e);
+            continue;
+          }
           const data = uploadDB.exec(`SELECT * FROM "${name}"`, { rowMode: "object" });
           if (data.length > 0) {
             const columns = Object.keys(data[0]);
@@ -205,10 +215,7 @@ async function drawTables() {
       )}
     </div>
   `;
-  render(
-    [tables],
-    $schema
-  );
+  render([tables], $schema);
 }
 
 function notify(cls, title, message) {
@@ -218,4 +225,119 @@ function notify(cls, title, message) {
   $toastHeader.classList.remove("text-bg-success", "text-bg-danger", "text-bg-warning", "text-bg-info");
   $toastHeader.classList.add(`text-bg-${cls}`);
   toast.show();
+}
+
+// --------------------------------------------------------------------
+// Query form
+
+$queryForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+
+  const data = new FormData($queryForm);
+  let schema = DB.schema();
+  if (!schema.length) await autoload();
+  schema = DB.schema();
+  schema = schema
+    .map(({ sql }) => sql)
+    .join("\n\n");
+
+  for await (const { content, tool, args } of asyncLLM("https://llmfoundry.straive.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      stream: true,
+      messages: [
+        { role: "system", content: data.get("prompt").replace("$SCHEMA", schema) },
+        { role: "user", content: data.get("q") },
+      ],
+      tool_choice: "required",
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "sql",
+            description: "Run an SQL query. Return { count: number, results: [{}, ...] }",
+            parameters: {
+              type: "object",
+              properties: { query: { type: "string", description: "The SQL query to run." } },
+              required: ["query"],
+            },
+          },
+        },
+        {
+          type: "function",
+          function: {
+            name: "similar",
+            description: "Get the most similar values to a given input from a table's column. Return [value, ...]",
+            parameters: {
+              type: "object",
+              properties: {
+                table: { type: "string", description: "The table to search in." },
+                column: { type: "string", description: "The column to search in." },
+                input: { type: "string", description: "The input to search for." },
+              },
+              required: ["table", "column", "input"],
+            },
+          },
+        },
+      ],
+    }),
+  })) {
+    console.log(content, tool, args);
+    // Update the output in real time.
+    // document.getElementById("output").textContent = content;
+  }
+});
+
+
+function saveFormState($form, formKey) {
+  // When the page loads, restore the form state from localStorage
+  for (const [key, value] of Object.entries(JSON.parse(localStorage[formKey] || "{}"))) {
+    const input = $form.querySelector(`[name="${key}"]`);
+    if (!input) continue;
+    if (input.matches("textarea, select, input[type=range], input[type=text]")) input.value = value;
+    else if (input.matches("input[type=checkbox]")) input.checked = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  // When form is changed, save the form state to localStorage
+  $form.addEventListener(
+    "input",
+    () => (localStorage[formKey] = JSON.stringify(Object.fromEntries(new FormData($form))))
+  );
+  // When form is reset, also clear localStorage
+  $form.addEventListener("reset", () => (localStorage[formKey] = "{}"));
+}
+
+saveFormState($queryForm, "cocoagpt");
+
+
+async function autoload() {
+  notify("info", "Loading", /* html */ `Loading default datasets <div class='spinner-border spinner-border-sm'></div>`);
+
+  try {
+    // Fetch the SQLite database
+    const dbResponse = await fetch("barry-callebout-data.db");
+    const dbBlob = await dbResponse.blob();
+    const dbFile = new File([dbBlob], "barry-callebout-data.db");
+
+    // Fetch the CSV file
+    const csvResponse = await fetch("metadata.csv");
+    const csvBlob = await csvResponse.blob();
+    const csvFile = new File([csvBlob], "metadata.csv");
+
+    // Upload both files using existing DB methods
+    await Promise.all([
+      DB.upload(dbFile),
+      DB.upload(csvFile)
+    ]);
+
+    notify("success", "Loaded", "Default datasets imported successfully");
+    drawTables();
+  } catch (error) {
+    console.error(error);
+    notify("danger", "Error", "Failed to load default datasets");
+  }
 }

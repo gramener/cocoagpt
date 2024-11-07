@@ -1,13 +1,16 @@
 import sqlite3InitModule from "https://esm.sh/@sqlite.org/sqlite-wasm@3.46.1-build3";
 import { render, html } from "https://cdn.jsdelivr.net/npm/lit-html@3/+esm";
-import { asyncLLM } from "https://cdn.jsdelivr.net/npm/asyncllm@1";
+import { asyncLLM } from "https://cdn.jsdelivr.net/npm/asyncllm@2.1";
 import { unsafeHTML } from "https://cdn.jsdelivr.net/npm/lit-html@3/directives/unsafe-html.js";
+import { parse } from "https://cdn.jsdelivr.net/npm/partial-json@0.1.7/+esm";
 import { dsvFormat, autoType } from "https://cdn.jsdelivr.net/npm/d3-dsv@3/+esm";
 import { Marked } from "https://cdn.jsdelivr.net/npm/marked@13/+esm";
 
 const $upload = document.getElementById("upload");
 const $prompt = document.getElementById("prompt");
 const $schema = document.getElementById("schema");
+const $filters = document.getElementById("filters");
+const $output = document.getElementById("output");
 const $toast = document.getElementById("toast");
 const toast = new bootstrap.Toast($toast);
 const $queryForm = document.getElementById("query-form");
@@ -15,6 +18,9 @@ const $queryForm = document.getElementById("query-form");
 // Initialize SQLite
 const defaultDB = "@";
 const sqlite3 = await sqlite3InitModule({ printErr: console.error });
+
+// Global message queue
+let messages;
 
 // --------------------------------------------------------------------
 // Manage database tables
@@ -237,21 +243,25 @@ $queryForm.addEventListener("submit", async (e) => {
   let schema = DB.schema();
   if (!schema.length) await autoload();
   schema = DB.schema();
-  schema = schema
-    .map(({ sql }) => sql)
-    .join("\n\n");
+  schema = schema.map(({ sql }) => sql).join("\n\n");
 
-  for await (const { content, tool, args } of asyncLLM("https://llmfoundry.straive.com/openai/v1/chat/completions", {
+  messages = [
+    { role: "system", content: data.get("prompt").replace("$SCHEMA", schema) },
+    { role: "user", content: data.get("q") },
+  ];
+
+  const toolArgs = (name, args) =>
+    name == "sql" ? args.query : name == "similar" ? html`${args.table}.${args.column} ~ ${args.input}` : "";
+
+  let content, tools;
+  for await ({ content, tools } of asyncLLM("https://llmfoundry.straive.com/openai/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify({
       model: "gpt-4o-mini",
       stream: true,
-      messages: [
-        { role: "system", content: data.get("prompt").replace("$SCHEMA", schema) },
-        { role: "user", content: data.get("q") },
-      ],
+      messages,
       tool_choice: "required",
       tools: [
         {
@@ -285,12 +295,67 @@ $queryForm.addEventListener("submit", async (e) => {
       ],
     }),
   })) {
-    console.log(content, tool, args);
-    // Update the output in real time.
-    // document.getElementById("output").textContent = content;
+    render(
+      html`<table class="table table-striped table-sm">
+        <thead>
+          <tr>
+            <th>Tool</th>
+            <th>Arguments</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${tools.map(({ name, args }) => {
+            if (!args) return null;
+            return html`<tr>
+              <td>${name}</td>
+              <td>${toolArgs(name, args)}</td>
+            </tr>`;
+          })}
+        </tbody>
+      </table>`,
+      $filters
+    );
+  }
+
+  // Add the tool calls to the messages
+  const tool_calls = tools.map(({ id, name, args }) => ({ id, type: "function", function: { name, arguments: args } }));
+  messages.push({ choices: [{ message: { role: "assistant", tool_calls } }] });
+
+  // Execute the tool calls
+  for (const tool of tools) {
+    tool.args = parse(tool.args);
+    if (tool.name == "sql") tool.result = db.exec(tool.args.query, { rowMode: "object" });
+    else if (tool.name == "similar") {
+      const { table, column, input } = tool.args;
+      tool.result = db.exec(`SELECT DISTINCT ${column} FROM ${table} WHERE ${column} LIKE ?`, {
+        bind: [`%${input}%`],
+        rowMode: "object",
+      });
+    }
+    render(
+      html`<table class="table table-striped table-sm">
+        <thead>
+          <tr>
+            <th>Tool</th>
+            <th>Arguments</th>
+            <th>Result</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${tools.map(
+            ({ name, args, result }) =>
+              html`<tr>
+                <td>${name}</td>
+                <td>${toolArgs(name, args)}</td>
+                <td>${JSON.stringify(result)}</td>
+              </tr>`
+          )}
+        </tbody>
+      </table>`,
+      $filters
+    );
   }
 });
-
 
 function saveFormState($form, formKey) {
   // When the page loads, restore the form state from localStorage
@@ -313,7 +378,6 @@ function saveFormState($form, formKey) {
 
 saveFormState($queryForm, "cocoagpt");
 
-
 async function autoload() {
   notify("info", "Loading", /* html */ `Loading default datasets <div class='spinner-border spinner-border-sm'></div>`);
 
@@ -329,10 +393,7 @@ async function autoload() {
     const csvFile = new File([csvBlob], "metadata.csv");
 
     // Upload both files using existing DB methods
-    await Promise.all([
-      DB.upload(dbFile),
-      DB.upload(csvFile)
-    ]);
+    await Promise.all([DB.upload(dbFile), DB.upload(csvFile)]);
 
     notify("success", "Loaded", "Default datasets imported successfully");
     drawTables();
@@ -341,3 +402,5 @@ async function autoload() {
     notify("danger", "Error", "Failed to load default datasets");
   }
 }
+
+autoload();

@@ -11,7 +11,7 @@ const $upload = document.getElementById("upload");
 const $prompt = document.getElementById("prompt");
 const $schema = document.getElementById("schema");
 const $filters = document.getElementById("filters");
-const $output = document.getElementById("output");
+const $pitch = document.getElementById("pitch");
 const $toast = document.getElementById("toast");
 const toast = new bootstrap.Toast($toast);
 const $queryForm = document.getElementById("query-form");
@@ -20,6 +20,7 @@ const $queryForm = document.getElementById("query-form");
 const defaultDB = "@";
 const sqlite3 = await sqlite3InitModule({ printErr: console.error });
 
+const marked = new Marked();
 let messages = []; // Global message queue
 let metadata; // Global metadata results
 let allTools = []; // Global tool results
@@ -323,7 +324,7 @@ $queryForm.addEventListener("submit", async (e) => {
       );
     }
   }
-  console.log("CONTENT", content);
+  if (content) render(unsafeHTML(marked.parse(content)), $pitch);
 
   // Add the tool calls to the messages
   const tool_calls = tools.map(({ id, name, args }) => ({ id, type: "function", function: { name, arguments: args } }));

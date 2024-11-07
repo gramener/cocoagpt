@@ -2,6 +2,7 @@ import sqlite3InitModule from "https://esm.sh/@sqlite.org/sqlite-wasm@3.46.1-bui
 import { render, html } from "https://cdn.jsdelivr.net/npm/lit-html@3/+esm";
 import { asyncLLM } from "https://cdn.jsdelivr.net/npm/asyncllm@2.1";
 import { unsafeHTML } from "https://cdn.jsdelivr.net/npm/lit-html@3/directives/unsafe-html.js";
+import Fuse from "https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.mjs";
 import { parse } from "https://cdn.jsdelivr.net/npm/partial-json@0.1.7/+esm";
 import { dsvFormat, autoType } from "https://cdn.jsdelivr.net/npm/d3-dsv@3/+esm";
 import { Marked } from "https://cdn.jsdelivr.net/npm/marked@13/+esm";
@@ -19,8 +20,10 @@ const $queryForm = document.getElementById("query-form");
 const defaultDB = "@";
 const sqlite3 = await sqlite3InitModule({ printErr: console.error });
 
-// Global message queue
-let messages;
+let messages = []; // Global message queue
+let metadata; // Global metadata results
+let allTools = []; // Global tool results
+const maxRows = 20; // Maximum number of rows to return from a tool call
 
 // --------------------------------------------------------------------
 // Manage database tables
@@ -158,6 +161,7 @@ $upload.addEventListener("change", async (e) => {
   const uploadPromises = Array.from(e.target.files).map((file) => DB.upload(file));
   await Promise.all(uploadPromises);
   notify("success", "Imported", `Imported all files`);
+  prepareMetadata();
   drawTables();
 });
 
@@ -245,10 +249,11 @@ $queryForm.addEventListener("submit", async (e) => {
   schema = DB.schema();
   schema = schema.map(({ sql }) => sql).join("\n\n");
 
-  messages = [
+  const currentMessages = [
     { role: "system", content: data.get("prompt").replace("$SCHEMA", schema) },
     { role: "user", content: data.get("q") },
   ];
+  messages.splice(0, 2, ...currentMessages);
 
   const toolArgs = (name, args) =>
     name == "sql" ? args.query : name == "similar" ? html`${args.table}.${args.column} ~ ${args.input}` : "";
@@ -262,7 +267,7 @@ $queryForm.addEventListener("submit", async (e) => {
       model: "gpt-4o-mini",
       stream: true,
       messages,
-      tool_choice: "required",
+      // tool_choice: "required",
       tools: [
         {
           type: "function",
@@ -295,67 +300,102 @@ $queryForm.addEventListener("submit", async (e) => {
       ],
     }),
   })) {
-    render(
-      html`<table class="table table-striped table-sm">
-        <thead>
-          <tr>
-            <th>Tool</th>
-            <th>Arguments</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${tools.map(({ name, args }) => {
-            if (!args) return null;
-            return html`<tr>
-              <td>${name}</td>
-              <td>${toolArgs(name, args)}</td>
-            </tr>`;
-          })}
-        </tbody>
-      </table>`,
-      $filters
-    );
+    if (tools) {
+      render(
+        html`<table class="table table-striped table-sm">
+          <thead>
+            <tr>
+              <th>Tool</th>
+              <th>Arguments</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${tools.map(({ name, args }) => {
+              if (!args) return null;
+              return html`<tr>
+                <td>${name}</td>
+                <td>${toolArgs(name, args)}</td>
+              </tr>`;
+            })}
+          </tbody>
+        </table>`,
+        $filters
+      );
+    }
   }
+  console.log("CONTENT", content);
 
   // Add the tool calls to the messages
   const tool_calls = tools.map(({ id, name, args }) => ({ id, type: "function", function: { name, arguments: args } }));
-  messages.push({ choices: [{ message: { role: "assistant", tool_calls } }] });
+  messages.push({ role: "assistant", tool_calls });
 
   // Execute the tool calls
   for (const tool of tools) {
     tool.args = parse(tool.args);
-    if (tool.name == "sql") tool.result = db.exec(tool.args.query, { rowMode: "object" });
-    else if (tool.name == "similar") {
+    if (tool.name == "sql") {
+      try {
+        tool.result = db.exec(tool.args.query, { rowMode: "object" }).slice(0, maxRows);
+      } catch (e) {
+        tool.result = { error: e.message };
+      }
+    } else if (tool.name == "similar") {
       const { table, column, input } = tool.args;
-      tool.result = db.exec(`SELECT DISTINCT ${column} FROM ${table} WHERE ${column} LIKE ?`, {
-        bind: [`%${input}%`],
-        rowMode: "object",
-      });
+      try {
+        tool.result = db
+          .exec(`SELECT DISTINCT ${column} FROM ${table} WHERE ${column} LIKE ?`, {
+            bind: [`%${input}%`],
+            rowMode: "object",
+          })
+          .slice(0, maxRows);
+      } catch (e) {
+        tool.result = { error: e.message };
+      }
     }
-    render(
-      html`<table class="table table-striped table-sm">
-        <thead>
-          <tr>
-            <th>Tool</th>
-            <th>Arguments</th>
-            <th>Result</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${tools.map(
-            ({ name, args, result }) =>
-              html`<tr>
-                <td>${name}</td>
-                <td>${toolArgs(name, args)}</td>
-                <td>${JSON.stringify(result)}</td>
-              </tr>`
-          )}
-        </tbody>
-      </table>`,
-      $filters
-    );
+    allTools.push(tool);
+    console.log(allTools);
+    messages.push({ role: "tool", tool_call_id: tool.id, content: JSON.stringify(tool.result) });
   }
+
+  render(
+    html`<table class="table table-striped table-sm">
+      <thead>
+        <tr>
+          <th>Tool</th>
+          <th>Arguments</th>
+          <th>Result</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${allTools.toReversed().map(
+          ({ name, args, result }) =>
+            html`<tr>
+              <td>${name}</td>
+              <td>${toolArgs(name, args)}</td>
+              <td>${JSON.stringify(result)}</td>
+            </tr>`
+        )}
+      </tbody>
+    </table>`,
+    $filters
+  );
 });
+
+// --------------------------------------------------------------------
+function prepareMetadata() {
+  metadata = { table: db.exec("SELECT * FROM metadata", { rowMode: "object" }) };
+  if (!metadata.table.length) return;
+  const fields = metadata.table.filter(
+    ({ category }) => category == "embedding" || category == "enum" || category == "string-diff"
+  );
+  const tables = [...new Set(fields.map(({ table }) => table))];
+  metadata.fuse = {};
+  for (const table of tables) {
+    const tableFields = fields.filter(({ table: ftable }) => ftable == table);
+    // TODO
+    // metadata.fuse[table] = new Fuse(db.exec("SELECT *"), { keys: ["column"] });
+  }
+  console.log(metadata);
+}
 
 function saveFormState($form, formKey) {
   // When the page loads, restore the form state from localStorage
@@ -396,6 +436,8 @@ async function autoload() {
     await Promise.all([DB.upload(dbFile), DB.upload(csvFile)]);
 
     notify("success", "Loaded", "Default datasets imported successfully");
+
+    prepareMetadata();
     drawTables();
   } catch (error) {
     console.error(error);

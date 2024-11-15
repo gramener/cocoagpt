@@ -460,7 +460,7 @@ function getWhereCondition(arr) {
   arr.forEach(element => {
     if (element.name === "sql") {
       let q = element.args["query"];
-      let whereMatch = q.match(/\bWHERE\b\s+([^L]+)(?=\s+LIKE)/i);  // Capture everything between WHERE and LIKE
+      let whereMatch = q.match(/\bWHERE\b\s+([^\s]+)(?=\s+\b(?:AND|OR|GROUP|ORDER|HAVING|LIMIT|$))/i);
       // Only add the match if it exists and is not already in sqlarray
       if (whereMatch && whereMatch[1]) {
         let condition = whereMatch[1].trim();

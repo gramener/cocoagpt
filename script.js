@@ -25,6 +25,9 @@ let messages = []; // Global message queue
 let metadata; // Global metadata results
 let allTools = []; // Global tool results
 const maxRows = 20; // Maximum number of rows to return from a tool call
+let sqlarray = [];
+let jsonData = [];
+// let formattedResult = {};
 
 // --------------------------------------------------------------------
 // Manage database tables
@@ -352,10 +355,16 @@ $queryForm.addEventListener("submit", async (e) => {
         tool.result = { error: e.message };
       }
     }
+    jsonData.push({ toolName: tool.name, args: tool.args, result: tool.result });
     allTools.push(tool);
     console.log(allTools);
     messages.push({ role: "tool", tool_call_id: tool.id, content: JSON.stringify(tool.result) });
   }
+    // Convert jsonData to JSON format and save it
+  const jsonString = JSON.stringify(jsonData, null, 2);
+  console.log("JSON string:", typeof(jsonString));
+  console.log("JSON data:", jsonData);
+  console.log("Json type", typeof(jsonData));
 
   render(
     html`<table class="table table-striped table-sm">
@@ -379,6 +388,8 @@ $queryForm.addEventListener("submit", async (e) => {
     </table>`,
     $filters
   );
+  getWhereCondition(allTools);
+  renderSentencesInCard(sqlarray,jsonData);
 });
 
 // --------------------------------------------------------------------
@@ -445,5 +456,79 @@ async function autoload() {
     notify("danger", "Error", "Failed to load default datasets");
   }
 }
-
+function getWhereCondition(arr) {
+  arr.forEach(element => {
+    if (element.name === "sql") {
+      let q = element.args["query"];
+      let whereMatch = q.match(/\bWHERE\b\s+([^L]+)(?=\s+LIKE)/i);  // Capture everything between WHERE and LIKE
+      // Only add the match if it exists and is not already in sqlarray
+      if (whereMatch && whereMatch[1]) {
+        let condition = whereMatch[1].trim();
+        if (!sqlarray.includes(condition)) {
+          sqlarray.push(condition);
+        }
+      }
+    }
+  });
+  console.log("output",sqlarray);
+}
+function renderSentencesInCard(sentences, jsonData) {
+  // Ensure that sentences array exists and is not empty before continuing
+  if (Array.isArray(sentences) && sentences.length > 0) {
+    document.getElementById("wherefilter").classList.remove("d-none");
+    // Function to extract column names and corresponding unique values based on the sentence and jsonData
+    function extractValuesBySummary(jsonData) {
+      let formattedResult = {};  // Initialize the formattedResult object
+      jsonData.forEach(item => {
+        // Check if toolName is 'sql' and result array has items
+        if (item.toolName === "sql" && item.result.length >= 0) {
+          item.result.forEach(entry => {
+            for (const [key, value] of Object.entries(entry)) {
+              // If the key doesn't exist in formattedResult, initialize it as an array
+              if (!formattedResult[key]) {
+                formattedResult[key] = [];
+              }
+              // Only add unique values to the array for each key
+              if (!formattedResult[key].includes(value)) {
+                formattedResult[key].push(value);
+              }
+            }
+          });
+        }
+      });
+      // Filter the formattedResult to include only the keys present in sentences
+      let filteredResult = {};
+      sentences.forEach(sentence => {
+        if (formattedResult[sentence]) {
+          filteredResult[sentence] = formattedResult[sentence];
+        }else{filteredResult[sentence] = []}
+      });
+      return filteredResult;
+    }
+    let keyvalues = extractValuesBySummary(jsonData);
+    console.log("Filtered keyvalues:", keyvalues);
+    // Function to create dropdowns and values
+    const createSelectDropdown = (key, values) => html`
+      <div class="form-group">
+      <label for="${key}-select" class="my-2">${key}</label>
+      <select id="${key}-select" class="form-control">
+        ${Array.isArray(values) && values.length > 0
+          ? values.map(value => html`<option value="${value}">${value}</option>`)
+          : html`<option value="">No values found!</option>`
+        }
+      </select>
+    </div>
+    `;
+    // Render function for the card
+    const renderCard = () => html`
+      <div>
+        ${Object.entries(keyvalues).map(([key, values]) => createSelectDropdown(key, values))}
+      </div>
+    `;
+    // Render the card in the element with id "card"
+    render(renderCard(), document.getElementById('wherefilter'));
+  } else {
+    console.log("No sentences provided to render.");
+  }
+}
 autoload();

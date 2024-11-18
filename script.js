@@ -279,7 +279,6 @@ async function renderFilterTable(messages) {
 }
 
 async function matchFilter(filter) {
-  console.log(filter);
   const metadataRow = metadata.table.find(
     ({ table, column }) => table == filter.table && column == filter.column,
   );
@@ -305,7 +304,6 @@ async function matchFilter(filter) {
     score: score[0],
     value: values[i].value,
   }));
-  console.log(filter, filter.matches);
   render(filterTable(filterData), $filters);
 }
 
@@ -364,7 +362,6 @@ $filters.addEventListener("submit", async (e) => {
         content: `Update the filters: ${$filters.querySelector("#update-filter").value}`,
       },
     ];
-    console.log([...messages, ...newMessages]);
     await renderFilterTable([...messages, ...newMessages]);
   }
 });
@@ -401,8 +398,8 @@ $filters.addEventListener("click", async (e) => {
     for (const [table, { where, params }] of Object.entries(tables)) {
       const sql =
         where.length > 0
-          ? `SELECT * FROM ${table} WHERE ${where.join(" AND ")} LIMIT 101`
-          : `SELECT * FROM ${table} LIMIT 101`;
+          ? `SELECT * FROM ${table} WHERE ${where.join(" AND ")}`
+          : `SELECT * FROM ${table}`;
       try {
         tables[table].result = await db.exec(sql, {
           bind: params,
@@ -417,9 +414,10 @@ $filters.addEventListener("click", async (e) => {
 
     const commonKeys =
       keys.length > 0
-        ? keys.reduce((a, b) => new Set([...a].filter((x) => b.has(x))))
+        ? keys
+            .filter((k) => k.size > 1)
+            .reduce((a, b) => new Set([...a].filter((x) => b.has(x))))
         : new Set();
-    console.log(commonKeys);
     results.push(
       html` <details>
         <summary class="alert alert-primary">
@@ -427,7 +425,7 @@ $filters.addEventListener("click", async (e) => {
           ${commonKeys.size > 100 ? "100+" : commonKeys.size} results
         </summary>
         <div class="list-group">
-          ${[...commonKeys].map(
+          ${[...commonKeys].slice(0, 100).map(
             (key) =>
               html`<a href="#" class="list-group-item list-group-item-action"
                 >${key}</a
@@ -457,7 +455,7 @@ const drawTable = (name, table) => {
             </tr>
           </thead>
           <tbody>
-            ${table.map(
+            ${table.slice(0, 100).map(
               (row) =>
                 html`<tr>
                   ${columns.map((col) => html`<td>${row[col]}</td>`)}

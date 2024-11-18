@@ -9,6 +9,7 @@
 # ]
 # ///
 
+import json
 import sys
 import re
 from pathlib import Path
@@ -68,6 +69,8 @@ def process_excel_files(base_path: str) -> None:
     Args:
         base_path: Root directory to search for Excel files
     """
+    results = {}
+    json_path = 'data.json'
     db_path = 'data.db'
     metadata_rows: List[Dict] = []
 
@@ -80,7 +83,8 @@ def process_excel_files(base_path: str) -> None:
             df.columns = [sanitize_name(col) for col in df.columns]
 
             df.to_sql(table_name, f'sqlite:///{db_path}', if_exists='replace', index=False)
-            print(f"Processed {excel_file.name} -> {table_name}")
+            results[table_name] = df.to_dict(orient='records')
+            print(f"Processed {excel_file.name} -> {table_name} ({len(results[table_name])} rows)")
 
             # Generate metadata for each column
             for col in df.columns:
@@ -96,6 +100,9 @@ def process_excel_files(base_path: str) -> None:
 
         except Exception as e:
             print(f"Error processing {excel_file}: {e}")
+
+    with open(json_path, 'w') as f:
+        json.dump(results, f)
 
     # Create metadata CSV
     pd.DataFrame(metadata_rows).to_csv('metadata.csv', index=False)
